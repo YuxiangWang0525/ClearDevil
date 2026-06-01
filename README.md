@@ -7,7 +7,7 @@ A third-party control implementation of YUU(Yes-YouYoung) Little Devil Fully Aut
 - Auto connect your Little Devil Device
 - Classic mode control (10 preset modes)
 - Munual mode control
-- 🌐 RESTful API 
+- RESTful API 
 
 ## Requirements
 
@@ -110,7 +110,7 @@ Send BLE command `c3 7e 25 62 63`
 curl "http://127.0.0.1:8080/stop"
 ```
 
-## 响应格式
+## Example response
 
 Successful response:
 ```json
