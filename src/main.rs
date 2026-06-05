@@ -1,20 +1,28 @@
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+    Json, Router,
+};
 use btleplug::api::{Central, Manager as _, Peripheral as _};
 use btleplug::platform::{Adapter, Manager, Peripheral};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::net::TcpListener;
 use tokio::time::sleep;
 
 // 命令数据结构
 #[derive(Debug, Clone)]
 struct DeviceState {
     peripheral: Peripheral,
-    connected: bool,
 }
 
 // 应用状态
+#[derive(Clone)]
 struct AppState {
     device: Arc<Mutex<Option<DeviceState>>>,
 }
@@ -201,19 +209,31 @@ async fn send_command(peripheral: &Peripheral, command: &[u8]) -> Result<(), Box
 }
 
 // 健康检查端点
-async fn health_check() -> impl Responder {
-    HttpResponse::Ok().body("OK")
+async fn health_check() -> &'static str {
+    "OK"
+}
+
+fn json_response(status: StatusCode, body: serde_json::Value) -> Response {
+    (status, Json(body)).into_response()
+}
+
+fn current_peripheral(data: &AppState) -> Option<Peripheral> {
+    data.device
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|state| state.peripheral.clone())
 }
 
 // 经典模式端点
 async fn classic_mode(
-    query: web::Query<ClassicModeQuery>,
-    data: web::Data<AppState>,
-) -> impl Responder {
+    Query(query): Query<ClassicModeQuery>,
+    State(data): State<AppState>,
+) -> Response {
     let mode_type = query.mode_type;
     
     if !(1..=10).contains(&mode_type) {
-        return HttpResponse::BadRequest().json(serde_json::json!({
+        return json_response(StatusCode::BAD_REQUEST, json!({
             "error": "type 必须在 1-10 之间"
         }));
     }
@@ -221,26 +241,25 @@ async fn classic_mode(
     let command = match get_classic_mode_command(mode_type) {
         Some(cmd) => cmd,
         None => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
+            return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({
                 "error": "获取命令失败"
             }));
         }
     };
 
-    let device_state = data.device.lock().unwrap();
-    if let Some(state) = device_state.as_ref() {
-        match send_command(&state.peripheral, &command).await {
-            Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+    if let Some(peripheral) = current_peripheral(&data) {
+        match send_command(&peripheral, &command).await {
+            Ok(_) => json_response(StatusCode::OK, json!({
                 "status": "success",
                 "mode": mode_type,
                 "command": format!("{:02x?}", command)
             })),
-            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            Err(e) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({
                 "error": format!("发送命令失败: {}", e)
             })),
         }
     } else {
-        HttpResponse::ServiceUnavailable().json(serde_json::json!({
+        json_response(StatusCode::SERVICE_UNAVAILABLE, json!({
             "error": "设备未连接"
         }))
     }
@@ -248,20 +267,20 @@ async fn classic_mode(
 
 // 手动控制端点
 async fn manual_mode(
-    query: web::Query<ManualModeQuery>,
-    data: web::Data<AppState>,
-) -> impl Responder {
+    Query(query): Query<ManualModeQuery>,
+    State(data): State<AppState>,
+) -> Response {
     let control_type = &query.control_type;
     let intensity = query.intensity;
 
     if intensity > 20 {
-        return HttpResponse::BadRequest().json(serde_json::json!({
+        return json_response(StatusCode::BAD_REQUEST, json!({
             "error": "intensity 必须在 0-20 之间"
         }));
     }
 
     if control_type != "A" && control_type != "B" {
-        return HttpResponse::BadRequest().json(serde_json::json!({
+        return json_response(StatusCode::BAD_REQUEST, json!({
             "error": "type 必须是 A 或 B"
         }));
     }
@@ -270,7 +289,7 @@ async fn manual_mode(
         match get_manual_a_command(intensity) {
             Some(cmd) => cmd,
             None => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
+                return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({
                     "error": "获取命令失败"
                 }));
             }
@@ -279,57 +298,55 @@ async fn manual_mode(
         match get_manual_b_command(intensity) {
             Some(cmd) => cmd,
             None => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
+                return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({
                     "error": "获取命令失败"
                 }));
             }
         }
     };
 
-    let device_state = data.device.lock().unwrap();
-    if let Some(state) = device_state.as_ref() {
-        match send_command(&state.peripheral, &command).await {
-            Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+    if let Some(peripheral) = current_peripheral(&data) {
+        match send_command(&peripheral, &command).await {
+            Ok(_) => json_response(StatusCode::OK, json!({
                 "status": "success",
                 "type": control_type,
                 "intensity": intensity,
                 "command": format!("{:02x?}", command)
             })),
-            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            Err(e) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({
                 "error": format!("发送命令失败: {}", e)
             })),
         }
     } else {
-        HttpResponse::ServiceUnavailable().json(serde_json::json!({
+        json_response(StatusCode::SERVICE_UNAVAILABLE, json!({
             "error": "设备未连接"
         }))
     }
 }
 
 // 停止端点
-async fn stop(data: web::Data<AppState>) -> impl Responder {
+async fn stop(State(data): State<AppState>) -> Response {
     let command = get_stop_command();
 
-    let device_state = data.device.lock().unwrap();
-    if let Some(state) = device_state.as_ref() {
-        match send_command(&state.peripheral, &command).await {
-            Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+    if let Some(peripheral) = current_peripheral(&data) {
+        match send_command(&peripheral, &command).await {
+            Ok(_) => json_response(StatusCode::OK, json!({
                 "status": "success",
                 "command": "stop",
                 "data": format!("{:02x?}", command)
             })),
-            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            Err(e) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({
                 "error": format!("发送命令失败: {}", e)
             })),
         }
     } else {
-        HttpResponse::ServiceUnavailable().json(serde_json::json!({
+        json_response(StatusCode::SERVICE_UNAVAILABLE, json!({
             "error": "设备未连接"
         }))
     }
 }
 
-#[actix_web::main]
+#[tokio::main]
 async fn main() -> std::io::Result<()> {
     println!("LittleDevil Ctrl 后端启动中...");
 
@@ -383,12 +400,11 @@ async fn main() -> std::io::Result<()> {
     }
 
     // 创建应用状态
-    let app_state = web::Data::new(AppState {
+    let app_state = AppState {
         device: Arc::new(Mutex::new(Some(DeviceState {
             peripheral,
-            connected: true,
         }))),
-    });
+    };
 
     println!("服务器启动在 http://127.0.0.1:8080");
     println!("可用接口:");
@@ -398,15 +414,13 @@ async fn main() -> std::io::Result<()> {
     println!("  GET /stop - 停止");
 
     // 启动 HTTP 服务器
-    HttpServer::new(move || {
-        App::new()
-            .app_data(app_state.clone())
-            .route("/health", web::get().to(health_check))
-            .route("/classicmode", web::get().to(classic_mode))
-            .route("/manualmode", web::get().to(manual_mode))
-            .route("/stop", web::get().to(stop))
-    })
-    .bind("127.0.0.1:8080")?
-    .run()
-    .await
+    let app = Router::new()
+        .route("/health", get(health_check))
+        .route("/classicmode", get(classic_mode))
+        .route("/manualmode", get(manual_mode))
+        .route("/stop", get(stop))
+        .with_state(app_state);
+
+    let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    axum::serve(listener, app).await
 }

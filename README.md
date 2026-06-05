@@ -1,6 +1,6 @@
 # ClearDevil
 
-A third-party control implementation of YUU(Yes-YouYoung) Little Devil Fully Automatic Male Masturbator Base on Rust+Actix Web
+A third-party control implementation of YUU(Yes-YouYoung) Little Devil Fully Automatic Male Masturbator Base on Rust+Axum
 
 ## Features
 
@@ -155,7 +155,7 @@ Check system Bluetooth logs: sudo journalctl -u bluetooth -f
 
 Tech Stack
 
-Actix-web 4: Web framework
+Axum 0.8: Web framework
 btleplug 0.11: Bluetooth LE library
 Tokio: Async runtime
 Serde: Serialization/Deserialization
